@@ -3,10 +3,11 @@ import telebot
 import requests
 from bs4 import BeautifulSoup
 from urllib.parse import quote
-from threading import Thread
+from threading import Thread, Lock
 from flask import Flask
 import time
 import logging
+import atexit
 
 # إعدادات السجل
 logging.basicConfig(
@@ -18,10 +19,13 @@ logger = logging.getLogger(__name__)
 # تهيئة Flask
 app = Flask(__name__)
 
+# قفل للعمليات الحرجة
+bot_lock = Lock()
+
 # الحصول على المتغيرات البيئية
 TOKEN = os.environ.get('TOKEN')
 API_KEY = os.environ.get('API_KEY')
-bot = telebot.TeleBot(TOKEN)
+bot = telebot.TeleBot(TOKEN, threaded=True)
 
 # جميع المصادر المقدمة مع روابط البحث الخاصة بها
 OFFICIAL_SOURCES = {
@@ -78,11 +82,12 @@ def health():
     return "OK", 200
 
 def set_bot_commands():
-    commands = [
-        telebot.types.BotCommand(cmd, desc) 
-        for cmd, desc in ARABIC_COMMANDS.items()
-    ]
-    bot.set_my_commands(commands)
+    with bot_lock:
+        commands = [
+            telebot.types.BotCommand(cmd, desc) 
+            for cmd, desc in ARABIC_COMMANDS.items()
+        ]
+        bot.set_my_commands(commands)
 
 @bot.message_handler(commands=['start'])
 def send_welcome(message):
@@ -100,31 +105,37 @@ def send_welcome(message):
 
 @bot.message_handler(commands=['who'])
 def who_are_you(message):
-    bot.reply_to(message, "أنا EdoBot، روبوت مساعد لطلاب السنة الرابعة متوسط في الجزائر 📚")
+    with bot_lock:
+        bot.reply_to(message, "أنا EdoBot، روبوت مساعد لطلاب السنة الرابعة متوسط في الجزائر 📚")
 
 @bot.message_handler(commands=['creator'])
 def who_created_you(message):
-    bot.reply_to(message, "صممني المطور Aymen dj max. 🌟\nزوروا موقعه: adm-web.ct.ws")
+    with bot_lock:
+        bot.reply_to(message, "صممني المطور Aymen dj max. 🌟\nزوروا موقعه: adm-web.ct.ws")
 
 @bot.message_handler(commands=['job'])
 def your_job(message):
-    bot.reply_to(message, "وظيفتي مساعدتك في:\n- حل أسئلة المنهاج\n- شرح الدروس\n- توفير مصادر موثوقة")
+    with bot_lock:
+        bot.reply_to(message, "وظيفتي مساعدتك في:\n- حل أسئلة المنهاج\n- شرح الدروس\n- توفير مصادر موثوقة")
 
 @bot.message_handler(commands=['reset'])
 def reset_chat(message):
-    bot.reply_to(message, "تم إعادة تعيين الدردشة بنجاح ✅")
+    with bot_lock:
+        bot.reply_to(message, "تم إعادة تعيين الدردشة بنجاح ✅")
 
 @bot.message_handler(commands=['search'])
 def handle_search(message):
-    msg = bot.reply_to(message, "أدخل سؤالك الدراسي:")
-    bot.register_next_step_handler(msg, process_search)
+    with bot_lock:
+        msg = bot.reply_to(message, "أدخل سؤالك الدراسي:")
+        bot.register_next_step_handler(msg, process_search)
 
 def process_search(message):
     try:
         handle_edu_question(message)
     except Exception as e:
         logger.error(f"Search error: {str(e)}")
-        bot.reply_to(message, "حدث خطأ أثناء البحث. يرجى المحاولة لاحقًا.")
+        with bot_lock:
+            bot.reply_to(message, "حدث خطأ أثناء البحث. يرجى المحاولة لاحقًا.")
 
 def is_study_related(text):
     subjects = ["رياضيات", "علوم", "فيزياء", "عربية", "فرنسية", 
@@ -138,7 +149,7 @@ def search_all_sources(query):
     for name, url in OFFICIAL_SOURCES.items():
         try:
             search_url = url + quote(query)
-            response = requests.get(search_url, timeout=10, headers={'User-Agent': 'Mozilla/5.0'})
+            response = requests.get(search_url, timeout=3, headers={'User-Agent': 'Mozilla/5.0'})
             
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, 'html.parser')
@@ -160,7 +171,7 @@ def search_all_sources(query):
     # البحث في المصادر الخاصة
     for url in SPECIAL_SOURCES:
         try:
-            response = requests.get(url, timeout=10)
+            response = requests.get(url, timeout=3)
             if response.status_code == 200:
                 soup = BeautifulSoup(response.text, 'html.parser')
                 found_links = []
@@ -193,7 +204,7 @@ def ask_gemini(query):
             f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={API_KEY}",
             json=data,
             headers=headers,
-            timeout=20
+            timeout=5
         )
         return response.json()['candidates'][0]['content']['parts'][0]['text']
     except Exception as e:
@@ -205,7 +216,8 @@ def handle_edu_question(message):
         
     # فلترة الأسئلة غير الدراسية
     if not is_study_related(text):
-        bot.reply_to(message, "عذرًا، أنا متخصص في الأسئلة الدراسية فقط. ركز على منهاج السنة الرابعة متوسط.")
+        with bot_lock:
+            bot.reply_to(message, "عذرًا، أنا متخصص في الأسئلة الدراسية فقط. ركز على منهاج السنة الرابعة متوسط.")
         return
     
     # البحث في المصادر الرسمية
@@ -215,10 +227,12 @@ def handle_edu_question(message):
         response = "🔍 نتائج البحث من المصادر الرسمية:\n\n"
         for i, (name, result) in enumerate(source_results[:3], 1):
             response += f"{i}. {name}:\n{result}\n\n"
-        bot.reply_to(message, response)
+        with bot_lock:
+            bot.reply_to(message, response)
     else:
         gemini_res = ask_gemini(text)
-        bot.reply_to(message, f"إجابة من المحتوى التعليمي:\n{gemini_res}")
+        with bot_lock:
+            bot.reply_to(message, f"إجابة من المحتوى التعليمي:\n{gemini_res}")
 
 @bot.message_handler(func=lambda m: True)
 def handle_message(message):
@@ -230,36 +244,59 @@ def handle_message(message):
         
         # الرد على التحيات والتعريف بالنفس
         if any(w in text for w in ["مرحبا", "اهلا", "سلام"]):
-            bot.reply_to(message, "مرحباً بك! أنا EdoBot، مساعدك الدراسي. 💡")
+            with bot_lock:
+                bot.reply_to(message, "مرحباً بك! أنا EdoBot، مساعدك الدراسي. 💡")
             return
         elif "من انت" in text:
-            bot.reply_to(message, "أنا EdoBot، روبوت مساعد لطلاب السنة الرابعة متوسط في الجزائر.")
+            with bot_lock:
+                bot.reply_to(message, "أنا EdoBot، روبوت مساعد لطلاب السنة الرابعة متوسط في الجزائر.")
             return
         elif "من صممك" in text:
-            bot.reply_to(message, "صممني المطور Aymen dj max. 🌟 زوروا موقعه: adm-web.ct.ws")
+            with bot_lock:
+                bot.reply_to(message, "صممني المطور Aymen dj max. 🌟 زوروا موقعه: adm-web.ct.ws")
             return
         
         handle_edu_question(message)
             
     except Exception as e:
         logger.error(f"Error handling message: {str(e)}")
-        bot.reply_to(message, "عذرًا، حدث خطأ غير متوقع. يرجى المحاولة لاحقًا.")
+        with bot_lock:
+            bot.reply_to(message, "عذرًا، حدث خطأ غير متوقع. يرجى المحاولة لاحقًا.")
 
 def run_flask():
     app.run(host='0.0.0.0', port=8080)
 
-def run_bot():
+def cleanup():
+    logger.info("Cleaning up resources...")
+    try:
+        bot.stop_polling()
+    except Exception as e:
+        logger.error(f"Cleanup error: {str(e)}")
+
+def bot_runner():
     while True:
         try:
             logger.info("Starting bot polling...")
-            bot.polling(none_stop=True, timeout=60)
+            bot.polling(non_stop=True, timeout=30, skip_pending=True)
         except Exception as e:
-            logger.error(f"Bot crashed: {str(e)}. Restarting in 10 seconds...")
-            time.sleep(10)
+            logger.error(f"Bot crashed: {str(e)}. Restarting in 5 seconds...")
+            time.sleep(5)
 
 if __name__ == "__main__":
+    atexit.register(cleanup)
     set_bot_commands()
-    flask_thread = Thread(target=run_flask)
-    flask_thread.daemon = True
+    
+    # تشغيل Flask في thread منفصل
+    flask_thread = Thread(target=run_flask, daemon=True)
     flask_thread.start()
-    run_bot()
+    
+    # تشغيل البوت مع إعادة تشغيل تلقائي
+    bot_thread = Thread(target=bot_runner, daemon=True)
+    bot_thread.start()
+    
+    # إبقاء البرنامج الرئيسي يعمل
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        logger.info("Shutting down...")
