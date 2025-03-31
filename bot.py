@@ -7,154 +7,97 @@ from threading import Thread, Lock
 from flask import Flask
 import time
 import logging
+import re
 
-# إعدادات السجل
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+# ... (ابقى على إعدادات السجل وتهيئة Flask كما هي)
 
-# تهيئة Flask
-app = Flask(__name__)
-
-# قفل للعمليات الحرجة
-bot_lock = Lock()
-
-# الحصول على المتغيرات البيئية
-TOKEN = os.environ.get('TOKEN')
-API_KEY = os.environ.get('API_KEY')
-bot = telebot.TeleBot(TOKEN)
-
-# المصادر التعليمية المحدثة
-EDUCATION_SOURCES = {
-    "الدروس والقوانين": {
-        "eddirasa": "https://www.eddirasa.com/?s=",
-        "profdz": "https://www.prof-dz.com/search?q="
-    },
-    "الفروض والاختبارات": {
-        "dzexams": "https://www.dzexams.com/search?q=",
-        "tassili": "https://www.tassilialgerie.com/recherche?q="
-    },
-    "اليوتيوب التعليمي": {
-        "قناة الأستاذ نور الدين": "https://www.youtube.com/c/ProfesseurNoureddine/search?query=",
-        "قناة تعليم نت": "https://www.youtube.com/c/TaalamMaana/search?query="
-    }
+# مصادر البحث المحدثة
+SEARCH_SOURCES = {
+    "الدروس": "https://www.eddirasa.com/?s=",
+    "الفروض": "https://www.dzexams.com/search?q="
 }
 
-# تحسين فهم الترحيب
-GREETINGS = ["مرحبا", "اهلا", "سلام", "السلام عليكم", "اهلين", "هلا"]
-INTRODUCTION = ["من انت", "من أنت", "تعريف", "عرف نفسك"]
-CREATOR = ["من صنعك", "من صممك", "المطور", "البرمجة"]
+# إعدادات يوتيوب
+YOUTUBE_API_KEY = os.environ.get('YOUTUBE_API_KEY')  # يحتاج مفتاح YouTube API
+YOUTUBE_SEARCH_URL = "https://www.googleapis.com/youtube/v3/search"
 
-# نظام تصنيف الأسئلة باستخدام Gemini
-def classify_question(text):
+def search_youtube(query):
     try:
-        prompt = f"""صنف هذا النص هل هو متعلق بالمنهاج الدراسي الجزائري للسنة الرابعة متوسط؟
-        أجب بنعم أو لا فقط.
-        النص: {text}"""
+        params = {
+            'part': 'snippet',
+            'q': query + " منهاج الجزائر رابعة متوسط",
+            'type': 'video',
+            'maxResults': 3,
+            'order': 'viewCount',  # الترتيب حسب المشاهدات
+            'key': YOUTUBE_API_KEY
+        }
         
-        response = requests.post(
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent",
-            json={"contents": [{"parts": [{"text": prompt}]}]},
-            params={"key": API_KEY},
-            timeout=10
-        )
-        return "نعم" in response.json()['candidates'][0]['content']['parts'][0]['text']
-    except Exception as e:
-        logger.error(f"تصنيف السؤال فشل: {str(e)}")
-        return False
-
-# البحث في المصادر التعليمية
-def search_educational_content(query):
-    try:
-        # البحث أولاً في المواقع التعليمية
+        response = requests.get(YOUTUBE_SEARCH_URL, params=params, timeout=10)
         results = []
-        for category, sites in EDUCATION_SOURCES.items():
-            for site_name, url in sites.items():
-                try:
-                    search_url = url + quote(query)
-                    response = requests.get(search_url, timeout=5, headers={'User-Agent': 'Mozilla/5.0'})
-                    
-                    if response.status_code == 200:
-                        soup = BeautifulSoup(response.text, 'html.parser')
-                        links = []
-                        
-                        for link in soup.find_all('a', href=True):
-                            href = link.get('href')
-                            title = link.text.strip()[:100]
-                            if href and title:
-                                links.append(f"{title}\n{href}")
-                        
-                        if links:
-                            results.append(f"🔍 نتائج من {site_name}:\n" + "\n".join(links[:2]))
-                except Exception as e:
-                    logger.error(f"خطأ في البحث بموقع {site_name}: {str(e)}")
         
-        if results:
-            return "\n\n".join(results)
+        for item in response.json().get('items', []):
+            video_id = item['id']['videoId']
+            title = item['snippet']['title']
+            url = f"https://youtu.be/{video_id}"
+            results.append(f"{title}\n{url}")
         
-        # إذا لم يجد في المصادر، يستخدم Gemini
-        prompt = f"""أجب كمعلم جزائري متخصص في منهاج السنة الرابعة متوسط:
-        السؤال: {query}
-        - قدم إجابة مختصرة واضحة
-        - إن لم تفهم السؤال قل: "لم أفهم سؤالك، يرجى التوضيح"
-        - لا تجب عن أي شيء غير دراسي"""
-        
-        response = requests.post(
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent",
-            json={"contents": [{"parts": [{"text": prompt}]}]},
-            params={"key": API_KEY},
-            timeout=15
-        )
-        return response.json()['candidates'][0]['content']['parts'][0]['text']
+        return results if results else None
         
     except Exception as e:
-        logger.error(f"البحث فشل: {str(e)}")
-        return "عذرًا، لا يمكن الإجابة الآن. يرجى المحاولة لاحقًا."
+        logger.error(f"خطأ في بحث يوتيوب: {str(e)}")
+        return None
+
+def search_websites(query):
+    results = []
+    for source_name, url in SEARCH_SOURCES.items():
+        try:
+            search_url = url + quote(query)
+            response = requests.get(search_url, timeout=5)
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            links = []
+            for link in soup.find_all('a', href=True):
+                if re.search(r'(درس|ملخص|تمرين|فرض|اختبار)', link.text, re.IGNORECASE):
+                    links.append(f"{link.text.strip()}\n{link['href']}")
+                    if len(links) >= 2:
+                        break
+            
+            if links:
+                results.append(f"🔍 نتائج من {source_name}:\n" + "\n".join(links))
+                
+        except Exception as e:
+            logger.error(f"خطأ في البحث بموقع {source_name}: {str(e)}")
+    
+    return results if results else None
 
 @bot.message_handler(func=lambda message: True)
 def handle_all_messages(message):
     try:
         text = message.text.lower()
         
-        # التحقق من الترحيب والتعريف
-        if any(greeting in text for greeting in GREETINGS):
-            bot.reply_to(message, "مرحبًا بك! أنا مساعدك الدراسي لرابعة متوسط. اسألني أي شيء عن المنهاج.")
-            return
-            
-        if any(intro in text for intro in INTRODUCTION):
-            bot.reply_to(message, "أنا EdoBot، مساعد دراسي متخصص في منهاج السنة الرابعة متوسط في الجزائر.")
-            return
-            
-        if any(creator in text for creator in CREATOR):
-            bot.reply_to(message, "صممني المطور Aymen dj max. تابع مشاريعه على: adm-web.ct.ws")
-            return
+        # معالجة الترحيب والتعريف (ابقى كما هي)
         
-        # التصنيف الآني باستخدام Gemini
-        is_educational = classify_question(text)
+        # البحث المتكامل
+        website_results = search_websites(text)
+        youtube_results = search_youtube(text)
         
-        if not is_educational:
-            bot.reply_to(message, "عذرًا، أنا متخصص فقط في الأسئلة الدراسية لمنهاج السنة الرابعة متوسط.")
-            return
+        response = []
+        
+        if website_results:
+            response.extend(website_results)
             
-        # البحث والإجابة
-        response = search_educational_content(message.text)
-        bot.reply_to(message, response)
+        if youtube_results:
+            response.append("🎬 فيديوهات مقترحة:\n" + "\n".join(youtube_results))
             
+        if not response:
+            # استخدام Gemini كحل أخير
+            gemini_response = ask_gemini(text)
+            response.append(gemini_response)
+            
+        bot.reply_to(message, "\n\n".join(response) if response else "لم أجد نتائج، حاول صياغة السؤال بشكل آخر")
+        
     except Exception as e:
         logger.error(f"خطأ في معالجة الرسالة: {str(e)}")
         bot.reply_to(message, "حدث خطأ غير متوقع. يرجى المحاولة لاحقًا.")
 
-# نظام التشغيل المستمر
-def run_bot():
-    while True:
-        try:
-            bot.polling(non_stop=True, timeout=30)
-        except Exception as e:
-            logger.error(f"تعطل البوت: {str(e)} - إعادة التشغيل خلال 10 ثوان")
-            time.sleep(10)
-
-if __name__ == "__main__":
-    Thread(target=run_bot, daemon=True).start()
-    app.run(host='0.0.0.0', port=8080)
+# ... (ابقى على باقي الدوال وإعدادات التشغيل كما هي)
