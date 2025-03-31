@@ -19,8 +19,8 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # الحصول على المتغيرات البيئية
-TOKEN = os.environ.get('7321228467:AAHI0kDCkoUcRvQ_HyDc5ommu6bweWOG_Ow')
-API_KEY = os.environ.get('AIzaSyBIulm0-B7LKL0WQOAkppg1bxpfa6TZQdg')
+TOKEN = os.environ.get('TOKEN')
+API_KEY = os.environ.get('API_KEY')
 bot = telebot.TeleBot(TOKEN)
 
 # جميع المصادر المقدمة مع روابط البحث الخاصة بها
